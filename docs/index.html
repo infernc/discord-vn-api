@@ -21,7 +21,6 @@
     }
     button:focus { outline: 3px solid #00FF00; border-color: #00FF00; background: #333; }
     
-    /* RECORD AREA - Fixed height prevents shifting */
     #recArea { 
       height: 52px; 
       display: flex; 
@@ -31,7 +30,6 @@
     }
     #recordBtn { margin: 0; }
     
-    /* Indicator centered in the same height as button */
     #recIndicator { 
       width: 100%; 
       text-align: center; 
@@ -45,19 +43,16 @@
     .flash { animation: flash 0.8s infinite; }
     @keyframes flash { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
     
-    /* THE ACTION STACK (Prevents Shifting) */
     #actionStack { min-height: 64px; margin: 8px 0; position: relative; }
     
-    /* Default Row */
     .channel-row { display: flex; align-items: stretch; gap: 6px; height: 64px; }
     fieldset { flex: 1; border: 1px solid #555; margin: 0; padding: 2px 6px; display: flex; flex-direction: column; justify-content: center; background: #111; }
     legend { color: #aaa; font-size: 11px; font-weight: bold; }
     label { display: block; font-size: 12px; }
 
-    #postBtn { width: 80px; background: #080; border-color: #0a0; height: 64px; margin: 0; }
+    #postBtn { width: 80px; background: #080; border-color: #0a0; height: 64px; margin: 0; font-size: 11px; }
     #postBtn:disabled { background: #333; border-color: #444; color: #777; }
     
-    /* Stop Row (Replaces Channel Row) */
     #stopBtn { background: #800; border-color: #a00; height: 64px; margin: 0; }
 
     #status { 
@@ -111,7 +106,7 @@
 </main>
 
 <script>
-  var API_URL = 'https://vnbackend-4e1utzn6.b4a.run';
+  var API_URL = 'https://discord-vn-api.onrender.com';
   
   var recordBtn = document.getElementById('recordBtn');
   var recIndicator = document.getElementById('recIndicator');
@@ -126,12 +121,49 @@
   var audioBlob = null;
   var audioChunks = [];
   var timerInterval;
+  var wakeInterval;
   var startTime;
 
-  window.addEventListener('keydown', function(e) {
-    if ((e.key === 'Enter' || e.key === 'Accept') && document.activeElement) {
-    }
-  });
+  function wakeBackend() {
+    postBtn.disabled = true;
+    postBtn.classList.add('flash');
+    statusBox.textContent = "server offline";
+    statusBox.className = "status-error";
+    
+    var wakeStart = Date.now();
+    // Start the M:SS counter for the wake process
+    wakeInterval = setInterval(function() {
+      var s = Math.floor((Date.now() - wakeStart) / 1000);
+      var mss = Math.floor(s/60) + ":" + (s%60 < 10 ? '0' : '') + (s%60);
+      postBtn.innerText = "Waking Server " + mss;
+    }, 1000);
+    
+    fetch(API_URL + '/health')
+      .then(function(res) {
+        clearInterval(wakeInterval);
+        postBtn.classList.remove('flash');
+        if (res.ok) {
+          postBtn.disabled = (audioBlob === null && fileInput.files.length === 0);
+          postBtn.innerText = "POST";
+          statusBox.textContent = "server online";
+          statusBox.className = "status-success";
+        } else {
+          postBtn.innerText = "Retry Wake Up";
+          postBtn.disabled = false;
+        }
+      })
+      .catch(function() {
+        clearInterval(wakeInterval);
+        postBtn.classList.remove('flash');
+        postBtn.innerText = "Retry Wake Up";
+        postBtn.disabled = false;
+        statusBox.textContent = "server offline";
+        statusBox.className = "status-error";
+      });
+  }
+  
+  // Initial call
+  wakeBackend();
 
   recordBtn.onclick = function() {
     navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
@@ -148,7 +180,7 @@
         stream.getTracks().forEach(function(t) { t.stop(); });
         postBtn.disabled = false;
         statusBox.textContent = "Recorded! Ready.";
-        statusBox.className = ""; 
+        statusBox.className = "status-success"; 
       };
 
       mediaRecorder.start(1000);
@@ -185,6 +217,10 @@
   }
 
   postBtn.onclick = function() {
+    if (postBtn.innerText.indexOf("Waking") !== -1 || postBtn.innerText.indexOf("Retry") !== -1) {
+        wakeBackend();
+        return;
+    }
     if (!audioBlob) return;
     postBtn.disabled = true;
     statusBox.innerHTML = '<span class="spinner"></span> Posting...';
@@ -192,7 +228,7 @@
 
     var channelVal = document.querySelector('input[name="channel"]:checked').value;
     var form = new FormData();
-    form.append('audio', blob = audioBlob, 'voice.webm');
+    form.append('audio', audioBlob, 'voice.webm');
     form.append('channel', channelVal);
 
     fetch(API_URL + '/voice-notes', { method: 'POST', body: form })
@@ -216,7 +252,7 @@
   fileInput.onchange = function() {
     if (fileInput.files.length) {
       audioBlob = fileInput.files[0];
-      postBtn.disabled = false;
+      if (postBtn.innerText === "POST") postBtn.disabled = false;
       statusBox.textContent = "File Ready.";
       statusBox.className = "";
     }

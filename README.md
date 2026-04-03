@@ -7,7 +7,7 @@ Lightweight FastAPI backend + static frontend for sending Discord voice notes vi
 - `main.py`: FastAPI application with `/voice-notes` endpoint.
 - `requirements.txt`: dependencies.
 - `static/index.html`: minimal form for clients (TCL Flip 3 friendly).
-- `Dockerfile`: for containerized deployment on Back4App.
+- `Dockerfile`: for containerized deployment on Render.
 
 ## Features
 
@@ -17,7 +17,7 @@ Lightweight FastAPI backend + static frontend for sending Discord voice notes vi
 - Supports two channels (Channel 1 & Channel 2) via radio buttons.
 - Frontend works on low-end devices (TCL Flip 3) with D-Pad navigation.
 - Includes visual feedback (flashing red indicator, status messages).
-- Frontend hosted on GitHub Pages, backend on Back4App (Docker).
+- Frontend hosted on GitHub Pages, backend on Render (Docker).
 
 ## Setup
 
@@ -64,7 +64,7 @@ Lightweight FastAPI backend + static frontend for sending Discord voice notes vi
 
 ## Deployment
 
-- **Backend**: Deploy to Back4App (Docker) - automatic builds from GitHub.
+- **Backend**: Deploy to Render (Docker) - automatic builds from GitHub.
 - **Frontend**: Deploy to GitHub Pages (static folder).
 
 ## Debugging API
