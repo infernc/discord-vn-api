@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=240, height=320, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>VN Sender</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 10px; font-family: system-ui, sans-serif; font-size: 14px; background: #000; color: #fff; overflow-x: hidden; }
+    main { max-width: 220px; margin: 0 auto; }
+    h1 { font-size: 16px; margin: 0 0 10px; text-align: center; color: #00FF00; }
+    
+    .hidden { display: none !important; }
+    
+    button { 
+      width: 100%; padding: 12px; margin: 6px 0; font-size: 16px; font-weight: bold;
+      background: #222; color: #fff; border: 2px solid #555;
+      -webkit-appearance: none; appearance: none;
+    }
+    button:focus { outline: 3px solid #00FF00; border-color: #00FF00; background: #333; }
+    
+    /* RECORD AREA - Fixed height prevents shifting */
+    #recArea { 
+      height: 52px; 
+      display: flex; 
+      align-items: center; 
+      justify-content: center; 
+      margin-bottom: 8px; 
+    }
+    #recordBtn { margin: 0; }
+    
+    /* Indicator centered in the same height as button */
+    #recIndicator { 
+      width: 100%; 
+      text-align: center; 
+      font-weight: bold; 
+      color: #FF0000; 
+      background: #300; 
+      padding: 10px; 
+      border: 2px solid #FF0000; 
+      margin: 0;
+    }
+    .flash { animation: flash 0.8s infinite; }
+    @keyframes flash { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    
+    /* THE ACTION STACK (Prevents Shifting) */
+    #actionStack { min-height: 64px; margin: 8px 0; position: relative; }
+    
+    /* Default Row */
+    .channel-row { display: flex; align-items: stretch; gap: 6px; height: 64px; }
+    fieldset { flex: 1; border: 1px solid #555; margin: 0; padding: 2px 6px; display: flex; flex-direction: column; justify-content: center; background: #111; }
+    legend { color: #aaa; font-size: 11px; font-weight: bold; }
+    label { display: block; font-size: 12px; }
+
+    #postBtn { width: 80px; background: #080; border-color: #0a0; height: 64px; margin: 0; }
+    #postBtn:disabled { background: #333; border-color: #444; color: #777; }
+    
+    /* Stop Row (Replaces Channel Row) */
+    #stopBtn { background: #800; border-color: #a00; height: 64px; margin: 0; }
+
+    #status { 
+      margin-top: 10px; min-height: 42px; color: #fff; text-align: center; 
+      font-size: 14px; font-weight: bold; background: #111; padding: 8px; border: 1px solid #444;
+    }
+    .status-success { color: #00FF00 !important; border-color: #00FF00 !important; }
+    .status-error { color: #FF4444 !important; border-color: #FF4444 !important; }
+    
+    #fileInput { width: 100%; margin-top: 8px; font-size: 11px; color: #999; }
+
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #00FF00;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Send Voice Note</h1>
+  
+  <div id="recArea">
+    <button id="recordBtn" tabindex="1">RECORD</button>
+    <div id="recIndicator" class="hidden flash">REC <span id="timer">0:00</span></div>
+  </div>
+  
+  <div id="actionStack">
+    <div id="defaultRow" class="channel-row">
+      <fieldset>
+        <legend>Channel:</legend>
+        <label><input type="radio" name="channel" value="1" checked tabindex="2" /> General</label>
+        <label><input type="radio" name="channel" value="2" tabindex="3" /> Monos</label>
+      </fieldset>
+      <button id="postBtn" tabindex="4" disabled>POST</button>
+    </div>
+
+    <button id="stopBtn" class="hidden" tabindex="5">STOP RECORDING</button>
+  </div>
+  
+  <div id="fileFallback">
+    <input type="file" id="fileInput" accept="audio/*" tabindex="6" />
+  </div>
+  
+  <div id="status" role="status">Ready</div>
+</main>
+
+<script>
+  var API_URL = 'https://ominous-orbit-jj4rv47j9gjg3jqwv-8000.app.github.dev/voice-notes';
+  
+  var recordBtn = document.getElementById('recordBtn');
+  var recIndicator = document.getElementById('recIndicator');
+  var defaultRow = document.getElementById('defaultRow');
+  var stopBtn = document.getElementById('stopBtn');
+  var postBtn = document.getElementById('postBtn');
+  var statusBox = document.getElementById('status');
+  var timerEl = document.getElementById('timer');
+  var fileInput = document.getElementById('fileInput');
+
+  var mediaRecorder;
+  var audioBlob = null;
+  var audioChunks = [];
+  var timerInterval;
+  var startTime;
+
+  window.addEventListener('keydown', function(e) {
+    if ((e.key === 'Enter' || e.key === 'Accept') && document.activeElement) {
+    }
+  });
+
+  recordBtn.onclick = function() {
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+      mediaRecorder = new MediaRecorder(stream, { 
+        mimeType: 'audio/webm;codecs=opus', 
+        audioBitsPerSecond: 24000 
+      });
+      audioChunks = [];
+      
+      mediaRecorder.ondataavailable = function(e) { if (e.data.size > 0) audioChunks.push(e.data); };
+      
+      mediaRecorder.onstop = function() {
+        audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        stream.getTracks().forEach(function(t) { t.stop(); });
+        postBtn.disabled = false;
+        statusBox.textContent = "Recorded! Ready.";
+        statusBox.className = ""; 
+      };
+
+      mediaRecorder.start(1000);
+      startTime = Date.now();
+      timerInterval = setInterval(updateTimer, 1000);
+      
+      recordBtn.classList.add('hidden');
+      recIndicator.classList.remove('hidden');
+      defaultRow.classList.add('hidden');
+      stopBtn.classList.remove('hidden');
+      stopBtn.focus();
+    }).catch(function(err) {
+      statusBox.textContent = "Mic Error: " + err.message;
+      statusBox.className = "status-error";
+    });
+  };
+
+  stopBtn.onclick = function() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+      clearInterval(timerInterval);
+      
+      recordBtn.classList.remove('hidden');
+      recIndicator.classList.add('hidden');
+      defaultRow.classList.remove('hidden');
+      stopBtn.classList.add('hidden');
+      postBtn.focus();
+    }
+  };
+
+  function updateTimer() {
+    var s = Math.floor((Date.now() - startTime) / 1000);
+    timerEl.textContent = Math.floor(s/60) + ":" + (s%60 < 10 ? '0' : '') + (s%60);
+  }
+
+  postBtn.onclick = function() {
+    if (!audioBlob) return;
+    postBtn.disabled = true;
+    statusBox.innerHTML = '<span class="spinner"></span> Posting...';
+    statusBox.className = "flash";
+
+    var channelVal = document.querySelector('input[name="channel"]:checked').value;
+    var form = new FormData();
+    form.append('audio', blob = audioBlob, 'voice.webm');
+    form.append('channel', channelVal);
+
+    fetch(API_URL, { method: 'POST', body: form })
+      .then(function(res) {
+        if (!res.ok) return res.json().then(function(e) { throw e; });
+        return res.json();
+      })
+      .then(function(json) {
+        statusBox.innerHTML = "✓ Sent! (" + json.duration_secs + "s)";
+        statusBox.className = "status-success";
+        audioBlob = null;
+        fileInput.value = "";
+      })
+      .catch(function(err) {
+        statusBox.textContent = "Error: " + (err.detail || err.message || "Failed");
+        statusBox.className = "status-error";
+        postBtn.disabled = false;
+      });
+  };
+
+  fileInput.onchange = function() {
+    if (fileInput.files.length) {
+      audioBlob = fileInput.files[0];
+      postBtn.disabled = false;
+      statusBox.textContent = "File Ready.";
+      statusBox.className = "";
+    }
+  };
+</script>
+</body>
+</html>
