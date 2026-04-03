@@ -116,7 +116,27 @@
   var statusBox = document.getElementById('status');
   var timerEl = document.getElementById('timer');
   var fileInput = document.getElementById('fileInput');
+  var wakeLock = null;
 
+  async function requestWakeLock() {
+    if ('wakeLock' in navigator) {
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        console.log("Wake Lock active");
+      } catch (err) {
+        console.error(err.name, err.message);
+      }
+    }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock !== null) {
+      wakeLock.release().then(() => {
+        wakeLock = null;
+        console.log("Wake Lock released");
+      });
+    }
+  }
   var mediaRecorder;
   var audioBlob = null;
   var audioChunks = [];
@@ -184,6 +204,7 @@
       };
 
       mediaRecorder.start(1000);
+      requestWakeLock();
       startTime = Date.now();
       timerInterval = setInterval(updateTimer, 1000);
       
@@ -202,7 +223,7 @@
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.stop();
       clearInterval(timerInterval);
-      
+      releaseWakeLock();
       recordBtn.classList.remove('hidden');
       recIndicator.classList.add('hidden');
       defaultRow.classList.remove('hidden');
