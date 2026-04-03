@@ -109,7 +109,7 @@
 </main>
 
 <script>
-  var API_URL = 'https://ominous-orbit-jj4rv47j9gjg3jqwv-8000.app.github.dev/voice-notes';
+  var API_URL = 'https://vnbackend-4e1utzn6.b4a.run';
   
   var recordBtn = document.getElementById('recordBtn');
   var recIndicator = document.getElementById('recIndicator');
@@ -193,7 +193,7 @@
     form.append('audio', blob = audioBlob, 'voice.webm');
     form.append('channel', channelVal);
 
-    fetch(API_URL, { method: 'POST', body: form })
+    fetch(API_URL + '/voice-notes', { method: 'POST', body: form })
       .then(function(res) {
         if (!res.ok) return res.json().then(function(e) { throw e; });
         return res.json();
