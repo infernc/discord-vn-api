@@ -158,8 +158,16 @@
       postBtn.innerText = "Waking Server " + mss;
     }, 1000);
     
-    fetch(API_URL + '/health')
+    // Add AbortController for timeout (3 minutes)
+    var controller = new AbortController();
+    var timeoutMs = 180000; // 3 minutes
+    var timeoutId = setTimeout(function() {
+      controller.abort();
+    }, timeoutMs);
+    
+    fetch(API_URL + '/health', { signal: controller.signal })
       .then(function(res) {
+        clearTimeout(timeoutId);
         clearInterval(wakeInterval);
         postBtn.classList.remove('flash');
         if (res.ok) {
@@ -172,12 +180,18 @@
           postBtn.disabled = false;
         }
       })
-      .catch(function() {
+      .catch(function(err) {
+        clearTimeout(timeoutId);
         clearInterval(wakeInterval);
         postBtn.classList.remove('flash');
         postBtn.innerText = "Retry Wake Up";
         postBtn.disabled = false;
-        statusBox.textContent = "server offline";
+        
+        if (err.name === 'AbortError') {
+          statusBox.textContent = "server unreachable";
+        } else {
+          statusBox.textContent = "server offline";
+        }
         statusBox.className = "status-error";
       });
   }
