@@ -106,7 +106,7 @@
 </main>
 
 <script>
-  var API_URL = 'https://ominous-orbit-jj4rv47j9gjg3jqwv-8000.app.github.dev';
+  var API_URL = 'https://discord-vn-api.onrender.com';
   
   var recordBtn = document.getElementById('recordBtn');
   var recIndicator = document.getElementById('recIndicator');
@@ -146,6 +146,9 @@
   var startTime;
 
   function wakeBackend() {
+    // Clear any existing interval to prevent stacking on re-entry
+    if (wakeInterval) clearInterval(wakeInterval);
+    
     postBtn.disabled = true;
     postBtn.classList.add('flash');
     statusBox.textContent = "server offline";
@@ -276,6 +279,8 @@
         statusBox.innerHTML = json.duration_secs ? "✓ Sent! (" + json.duration_secs + "s)" : "✓ Sent!";
         statusBox.className = "status-success";
         audioBlob = null;
+        audioBlobName = 'voice.webm';
+        audioChunks = [];
         fileInput.value = "";
       })
       .catch(function(err) {
@@ -294,6 +299,16 @@
       statusBox.className = "";
     }
   };
+
+  // Cleanup on page unload: stop recording, release wake lock
+  window.addEventListener('beforeunload', function() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+    }
+    clearInterval(timerInterval);
+    clearInterval(wakeInterval);
+    releaseWakeLock();
+  });
 </script>
 </body>
 </html>

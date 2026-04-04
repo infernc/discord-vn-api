@@ -190,18 +190,14 @@ async def create_voice_note(audio: UploadFile = None, channel: str = Form(defaul
         if not file_data:
             raise HTTPException(status_code=400, detail="No file provided")
 
-        print(f"Received file: {audio.filename}, size: {len(file_data)} bytes")
-
         # validate token early to provide clearer errors
         validate_bot_token()
 
         # Check if it's an image - post directly without conversion
         if is_image_file(audio.filename or ""):
-            print(f"Detected image: {audio.filename}")
             return await _post_image(target_channel, file_data, audio.filename or "image.png")
         
         # Otherwise treat as audio and convert to voice note
-        print(f"Detected audio, processing...")
         return await _post_voice_note(target_channel, file_data)
 
     except httpx.HTTPError as e:
