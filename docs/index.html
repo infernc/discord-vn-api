@@ -99,14 +99,14 @@
   </div>
   
   <div id="fileFallback">
-    <input type="file" id="fileInput" accept="audio/*" tabindex="6" />
+    <input type="file" id="fileInput" accept="audio/*,image/*" tabindex="6" />
   </div>
   
   <div id="status" role="status">Ready</div>
 </main>
 
 <script>
-  var API_URL = 'https://discord-vn-api.onrender.com';
+  var API_URL = 'https://ominous-orbit-jj4rv47j9gjg3jqwv-8000.app.github.dev';
   
   var recordBtn = document.getElementById('recordBtn');
   var recIndicator = document.getElementById('recIndicator');
@@ -139,6 +139,7 @@
   }
   var mediaRecorder;
   var audioBlob = null;
+  var audioBlobName = 'voice.webm';
   var audioChunks = [];
   var timerInterval;
   var wakeInterval;
@@ -263,7 +264,7 @@
 
     var channelVal = document.querySelector('input[name="channel"]:checked').value;
     var form = new FormData();
-    form.append('audio', audioBlob, 'voice.webm');
+    form.append('audio', audioBlob, audioBlobName);
     form.append('channel', channelVal);
 
     fetch(API_URL + '/voice-notes', { method: 'POST', body: form })
@@ -272,7 +273,7 @@
         return res.json();
       })
       .then(function(json) {
-        statusBox.innerHTML = "✓ Sent! (" + json.duration_secs + "s)";
+        statusBox.innerHTML = json.duration_secs ? "✓ Sent! (" + json.duration_secs + "s)" : "✓ Sent!";
         statusBox.className = "status-success";
         audioBlob = null;
         fileInput.value = "";
@@ -287,6 +288,7 @@
   fileInput.onchange = function() {
     if (fileInput.files.length) {
       audioBlob = fileInput.files[0];
+      audioBlobName = fileInput.files[0].name;
       if (postBtn.innerText === "POST") postBtn.disabled = false;
       statusBox.textContent = "File Ready.";
       statusBox.className = "";

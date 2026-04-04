@@ -161,90 +161,199 @@ def generate_waveform(audio_bytes: bytes) -> str:
 
     return base64.b64encode(bytes(waveform)).decode('ascii')
 
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.webm', '.opus', '.mp4', '.wma'}
+
+def is_image_file(filename: str) -> bool:
+    """Check if a file is an image based on its extension."""
+    ext = os.path.splitext(filename)[1].lower()
+    return ext in IMAGE_EXTENSIONS
+
+def is_audio_file(filename: str) -> bool:
+    """Check if a file is audio based on its extension."""
+    ext = os.path.splitext(filename)[1].lower()
+    return ext in AUDIO_EXTENSIONS
+
+import traceback
+
 @app.post("/voice-notes")
-async def create_voice_note(audio: UploadFile, channel: str = Form(default="1")):
-    """Create a voice note and send it to a Discord channel."""
+async def create_voice_note(audio: UploadFile = None, channel: str = Form(default="1")):
+    """Create a voice note or post an image to a Discord channel."""
     try:
         # Select channel ID based on form input
         target_channel = CHANNEL_ID_1 if channel == "1" else (CHANNEL_ID_2 or CHANNEL_ID_1)
         
-        audio_data = await audio.read()
-        if not audio_data:
-            raise HTTPException(status_code=400, detail="No audio provided")
+        if audio is None:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        file_data = await audio.read()
+        if not file_data:
+            raise HTTPException(status_code=400, detail="No file provided")
 
-        ogg_data = convert_to_opus_ogg(audio_data)
-        duration = get_duration(ogg_data)
-        waveform = generate_waveform(ogg_data)
+        print(f"Received file: {audio.filename}, size: {len(file_data)} bytes")
 
         # validate token early to provide clearer errors
         validate_bot_token()
 
-        resp = httpx.post(
-            f"{DISCORD_API}/channels/{target_channel}/attachments",
-            json={
-                "files": [
-                    {
-                        "id": "0",
-                        "filename": "voice-message.ogg",
-                        "file_size": len(ogg_data),
-                    }
-                ]
-            },
-            headers=HEADERS,
-            timeout=30,
-        )
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=resp.status_code, detail=f"Discord attachments error: {resp.status_code} {resp.text}")
-
-        attachment = resp.json().get("attachments", [])[0]
-        upload_url = attachment.get("upload_url")
-        upload_filename = attachment.get("upload_filename")
-        if not upload_url or not upload_filename:
-            raise HTTPException(status_code=500, detail="Discord attachment response missing fields")
-
-        try:
-            put_response = httpx.put(
-                upload_url,
-                content=ogg_data,
-                headers={"Content-Type": "audio/ogg"},
-                timeout=30,
-            )
-        except RequestError as e:
-            raise HTTPException(status_code=502, detail=f"Upload to CDN failed: {e}")
-        if put_response.status_code >= 400:
-            raise HTTPException(status_code=put_response.status_code, detail=f"Upload URL error: {put_response.status_code} {put_response.text}")
-
-        msg_response = httpx.post(
-            f"{DISCORD_API}/channels/{target_channel}/messages",
-            json={
-                "flags": 8192,
-                "attachments": [
-                    {
-                        "id": "0",
-                        "filename": "voice-message.ogg",
-                        "uploaded_filename": upload_filename,
-                        "duration_secs": duration,
-                        "waveform": waveform,
-                    }
-                ],
-            },
-            headers=HEADERS,
-            timeout=30,
-        )
-        if msg_response.status_code >= 400:
-            raise HTTPException(status_code=msg_response.status_code, detail=f"Send message error: {msg_response.status_code} {msg_response.text}")
-
-        return {
-            "status": "success",
-            "duration_secs": duration,
-            "file_size_bytes": len(ogg_data),
-            "message": msg_response.json(),
-        }
+        # Check if it's an image - post directly without conversion
+        if is_image_file(audio.filename or ""):
+            print(f"Detected image: {audio.filename}")
+            return await _post_image(target_channel, file_data, audio.filename or "image.png")
+        
+        # Otherwise treat as audio and convert to voice note
+        print(f"Detected audio, processing...")
+        return await _post_voice_note(target_channel, file_data)
 
     except httpx.HTTPError as e:
         raise HTTPException(status_code=400, detail=f"Discord API error: {e}")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+        print(f"ERROR: {type(e).__name__}: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Processing error: {type(e).__name__}: {e}")
+
+
+async def _post_image(target_channel: str, image_data: bytes, filename: str) -> dict:
+    """Post an image directly to Discord."""
+    # Determine content type
+    ext = os.path.splitext(filename)[1].lower()
+    content_type_map = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.bmp': 'image/bmp',
+    }
+    content_type = content_type_map.get(ext, 'image/png')
+
+    resp = httpx.post(
+        f"{DISCORD_API}/channels/{target_channel}/attachments",
+        json={
+            "files": [
+                {
+                    "id": "0",
+                    "filename": filename,
+                    "file_size": len(image_data),
+                }
+            ]
+        },
+        headers=HEADERS,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=f"Discord attachments error: {resp.status_code} {resp.text}")
+
+    attachment = resp.json().get("attachments", [])[0]
+    upload_url = attachment.get("upload_url")
+    upload_filename = attachment.get("upload_filename")
+    if not upload_url or not upload_filename:
+        raise HTTPException(status_code=500, detail="Discord attachment response missing fields")
+
+    try:
+        put_response = httpx.put(
+            upload_url,
+            content=image_data,
+            headers={"Content-Type": content_type},
+            timeout=30,
+        )
+    except RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Upload to CDN failed: {e}")
+    if put_response.status_code >= 400:
+        raise HTTPException(status_code=put_response.status_code, detail=f"Upload URL error: {put_response.status_code} {put_response.text}")
+
+    msg_response = httpx.post(
+        f"{DISCORD_API}/channels/{target_channel}/messages",
+        json={
+            "attachments": [
+                {
+                    "id": "0",
+                    "filename": filename,
+                    "uploaded_filename": upload_filename,
+                }
+            ],
+        },
+        headers=HEADERS,
+        timeout=30,
+    )
+    if msg_response.status_code >= 400:
+        raise HTTPException(status_code=msg_response.status_code, detail=f"Send message error: {msg_response.status_code} {msg_response.text}")
+
+    return {
+        "status": "success",
+        "file_size_bytes": len(image_data),
+        "message": msg_response.json(),
+    }
+
+
+async def _post_voice_note(target_channel: str, audio_data: bytes) -> dict:
+    """Convert audio to OGG/Opus and post as voice note to Discord."""
+    ogg_data = convert_to_opus_ogg(audio_data)
+    duration = get_duration(ogg_data)
+    waveform = generate_waveform(ogg_data)
+
+    resp = httpx.post(
+        f"{DISCORD_API}/channels/{target_channel}/attachments",
+        json={
+            "files": [
+                {
+                    "id": "0",
+                    "filename": "voice-message.ogg",
+                    "file_size": len(ogg_data),
+                }
+            ]
+        },
+        headers=HEADERS,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=f"Discord attachments error: {resp.status_code} {resp.text}")
+
+    attachment = resp.json().get("attachments", [])[0]
+    upload_url = attachment.get("upload_url")
+    upload_filename = attachment.get("upload_filename")
+    if not upload_url or not upload_filename:
+        raise HTTPException(status_code=500, detail="Discord attachment response missing fields")
+
+    try:
+        put_response = httpx.put(
+            upload_url,
+            content=ogg_data,
+            headers={"Content-Type": "audio/ogg"},
+            timeout=30,
+        )
+    except RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Upload to CDN failed: {e}")
+    if put_response.status_code >= 400:
+        raise HTTPException(status_code=put_response.status_code, detail=f"Upload URL error: {put_response.status_code} {put_response.text}")
+
+    msg_response = httpx.post(
+        f"{DISCORD_API}/channels/{target_channel}/messages",
+        json={
+            "flags": 8192,
+            "attachments": [
+                {
+                    "id": "0",
+                    "filename": "voice-message.ogg",
+                    "uploaded_filename": upload_filename,
+                    "duration_secs": duration,
+                    "waveform": waveform,
+                }
+            ],
+        },
+        headers=HEADERS,
+        timeout=30,
+    )
+    if msg_response.status_code >= 400:
+        raise HTTPException(status_code=msg_response.status_code, detail=f"Send message error: {msg_response.status_code} {msg_response.text}")
+
+    return {
+        "status": "success",
+        "duration_secs": duration,
+        "file_size_bytes": len(ogg_data),
+        "message": msg_response.json(),
+    }
 
 
 @app.get("/health")
