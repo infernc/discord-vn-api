@@ -5,3 +5,4 @@ av>=12.0.0
 numpy==1.26.0
 python-dotenv==1.0.0
 python-multipart
+scipy>=1.10.0

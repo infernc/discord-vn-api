@@ -9,6 +9,7 @@ import io
 import os
 import base64
 import numpy as np
+from scipy.signal import medfilt
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 dotenv_path = os.path.join(BASE_DIR, '.env')
@@ -114,52 +115,58 @@ def get_duration(audio_bytes: bytes) -> int:
 
 
 def generate_waveform(audio_bytes: bytes) -> str:
-    """Generate waveform using High-Gain Linear Scaling and a Hard Cap."""
     all_samples = []
     with av.open(io.BytesIO(audio_bytes)) as container:
         stream = container.streams.audio[0]
+        sample_rate = stream.codec_context.sample_rate
         for frame in container.decode(stream):
             all_samples.append(frame.to_ndarray().flatten().astype(np.float32))
 
     if not all_samples:
-        return base64.b64encode(bytes([0] * 256)).decode('ascii')
+        return ""
 
     full_audio = np.abs(np.concatenate(all_samples))
+    duration = len(full_audio) / sample_rate
     
-    # Use Mean + Std Dev instead of Max. 
-    # This naturally ignores peaks and focuses on the 'body' of the sound.
-    avg_volume = np.mean(full_audio)
-    std_volume = np.std(full_audio)
-    reference = avg_volume + (2 * std_volume) or 1.0
+    # 1. DYNAMIC BINNING
+    num_bins = int(np.clip(duration * 14, 40, 256))
+    raw_chunks = np.array_split(full_audio, num_bins)
     
-    raw_chunks = np.array_split(full_audio, 256)
-    waveform = []
-    
+    # Use Mean of the top 10% of each chunk (Robust Peak)
+    heights = []
     for chunk in raw_chunks:
-        if len(chunk) == 0:
-            waveform.append(0)
-            continue
-            
-        # Use Mean Absolute Deviation for the chunk (smoother than Peak)
-        val = np.mean(np.abs(chunk))
-        
-        # 1. HIGH GAIN: Multiply by a large factor to bring small bars up.
-        # 2. HARD CAP: Clip anything that goes over the limit.
-        # This forces the tall bars to stay at a consistent 'ceiling' 
-        # while small bars get pulled up significantly.
-        scaled = (val / reference) * 400 
-        
-        # Add a base height so even 'quiet' chunks have a visible bar
-        final_val = int(scaled) + 20 
-        
-        # Clip to Discord's visual 'sweet spot' (usually around 200-225)
-        waveform.append(np.clip(final_val, 0, 225))
+        if len(chunk) > 0:
+            top_decile = np.sort(chunk)[-max(1, len(chunk)//10):]
+            heights.append(np.mean(top_decile))
+        else:
+            heights.append(0)
+    
+    heights = np.array(heights)
 
-    # Strip only literal zeros
-    while len(waveform) > 1 and waveform[-1] == 0:
-        waveform.pop()
+    # 2. GLOBAL NORMALIZATION
+    if np.max(heights) > 0:
+        heights = heights / np.max(heights)
 
-    return base64.b64encode(bytes(waveform)).decode('ascii')
+    # 3. DISCRETE QUANTIZATION (The Discord Secret)
+    # We map the 0-1 range into 16 steps (0, 17, 34... 255)
+    # This removes the 'erratic' tiny differences between bars.
+    quantized = np.round(heights * 15) / 15
+    
+    # 4. NON-LINEAR LIFT (for the 'Short Bars')
+    # We apply the lift to the quantized levels so mids stay strong.
+    lifted = np.power(quantized, 0.5) * 255
+
+    # 5. MEDIAN FILTERING
+    # Unlike Gaussian, Median filtering keeps the 'pill' shape 
+    # but removes single-bar spikes that look out of place.
+    # kernel_size=3 means it looks at the bar before and after.
+    smoothed = medfilt(lifted, kernel_size=3)
+
+    # 6. FINAL FLOOR
+    # Discord bars are never shorter than a specific 'dot' size.
+    final_waveform = np.clip(smoothed, 30, 255).astype(np.uint8)
+
+    return base64.b64encode(bytes(final_waveform)).decode('ascii')
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.webm', '.opus', '.mp4', '.wma'}
