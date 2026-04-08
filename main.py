@@ -9,7 +9,8 @@ import io
 import os
 import base64
 import numpy as np
-from scipy.signal import medfilt
+from scipy.signal import butter, lfilter
+from scipy.interpolate import interp1d
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 dotenv_path = os.path.join(BASE_DIR, '.env')
@@ -113,60 +114,51 @@ def get_duration(audio_bytes: bytes) -> int:
                 total += float(frame.samples) / frame.sample_rate
         return max(1, int(round(total)))
 
-
-def generate_waveform(audio_bytes: bytes) -> str:
-    all_samples = []
-    with av.open(io.BytesIO(audio_bytes)) as container:
-        stream = container.streams.audio[0]
-        sample_rate = stream.codec_context.sample_rate
-        for frame in container.decode(stream):
-            all_samples.append(frame.to_ndarray().flatten().astype(np.float32))
-
-    if not all_samples:
-        return ""
-
-    full_audio = np.abs(np.concatenate(all_samples))
-    duration = len(full_audio) / sample_rate
+def generate_waveform(ogg_data: bytes) -> str:
+    # 1. Decode & Filter
+    file_like = io.BytesIO(ogg_data)
+    container = av.open(file_like)
+    audio = np.concatenate([f.to_ndarray().mean(axis=0).astype(np.float32) for f in container.decode(audio=0)])
+    sample_rate = container.streams.audio[0].rate
     
-    # 1. DYNAMIC BINNING
-    num_bins = int(np.clip(duration * 14, 40, 256))
-    raw_chunks = np.array_split(full_audio, num_bins)
+    # 2. FIXED STEP ENVELOPE
+    # Instead of dividing by 256, we calculate a point every 10ms
+    step_ms = 10 
+    samples_per_step = int(sample_rate * (step_ms / 1000))
     
-    # Use Mean of the top 10% of each chunk (Robust Peak)
-    heights = []
-    for chunk in raw_chunks:
-        if len(chunk) > 0:
-            top_decile = np.sort(chunk)[-max(1, len(chunk)//10):]
-            heights.append(np.mean(top_decile))
-        else:
-            heights.append(0)
+    # Calculate energy in fixed intervals
+    envelope = []
+    for i in range(0, len(audio), samples_per_step):
+        segment = audio[i:i+samples_per_step]
+        if len(segment) > 0:
+            # Using RMS for stability
+            envelope.append(np.sqrt(np.mean(np.square(segment))))
     
-    heights = np.array(heights)
+    envelope = np.array(envelope)
 
-    # 2. GLOBAL NORMALIZATION
-    if np.max(heights) > 0:
-        heights = heights / np.max(heights)
-
-    # 3. DISCRETE QUANTIZATION (The Discord Secret)
-    # We map the 0-1 range into 16 steps (0, 17, 34... 255)
-    # This removes the 'erratic' tiny differences between bars.
-    quantized = np.round(heights * 15) / 15
+    # 3. Resample Fixed Envelope -> 256 Bars
+    # This ensures that time is linear regardless of file length
+    x_old = np.linspace(0, 1, len(envelope))
+    x_new = np.linspace(0, 1, 256)
+    rms_vals = np.interp(x_new, x_old, envelope)
     
-    # 4. NON-LINEAR LIFT (for the 'Short Bars')
-    # We apply the lift to the quantized levels so mids stay strong.
-    lifted = np.power(quantized, 0.5) * 255
+    rms_vals /= (np.max(rms_vals) + 1e-9)
+    a = 800
+    waveform = (np.log(1 + a * rms_vals) / np.log(1 + a)) * 255
+    
+    # Limiter Knee
+    threshold = 125
+    ratio = 0.18
+    limited = np.where(waveform > threshold, threshold + (waveform - threshold) * ratio, waveform)
+    
+    # Final Constraints
+    final_val = np.clip(limited, 0, 185) # "Taller" request handled here
+    final_val[rms_vals < 0.005] = 0
+    
+    # Gaussian smoothing
+    final_waveform = np.convolve(final_val, [0.1, 0.8, 0.1], mode='same')
 
-    # 5. MEDIAN FILTERING
-    # Unlike Gaussian, Median filtering keeps the 'pill' shape 
-    # but removes single-bar spikes that look out of place.
-    # kernel_size=3 means it looks at the bar before and after.
-    smoothed = medfilt(lifted, kernel_size=3)
-
-    # 6. FINAL FLOOR
-    # Discord bars are never shorter than a specific 'dot' size.
-    final_waveform = np.clip(smoothed, 30, 255).astype(np.uint8)
-
-    return base64.b64encode(bytes(final_waveform)).decode('ascii')
+    return base64.b64encode(final_waveform.astype(np.uint8).tobytes()).decode('utf-8')
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.webm', '.opus', '.mp4', '.wma'}
