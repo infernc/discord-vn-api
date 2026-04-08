@@ -1,6 +1,5 @@
-from fastapi import FastAPI, UploadFile, HTTPException, Request, Form
+from fastapi import FastAPI, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 import httpx
 from httpx import RequestError
 import av
@@ -9,8 +8,6 @@ import io
 import os
 import base64
 import numpy as np
-from scipy.signal import butter, lfilter
-from scipy.interpolate import interp1d
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 dotenv_path = os.path.join(BASE_DIR, '.env')
@@ -40,7 +37,7 @@ HEADERS = {"Authorization": f"Bot {BOT_TOKEN}"}
 
 
 def validate_bot_token():
-    """Quick check: call Discord /users/@me to validate the bot token."""
+    """Validate the Discord bot token by calling the /users/@me endpoint."""
     try:
         r = httpx.get(f"{DISCORD_API}/users/@me", headers=HEADERS, timeout=10)
     except RequestError as e:
@@ -52,93 +49,137 @@ def validate_bot_token():
     return r.json()
 
 
-def convert_to_opus_ogg(input_bytes: bytes) -> bytes:
-    """Convert audio to OGG/Opus (48kHz, mono, 32kbps)."""
-    input_buf = io.BytesIO(input_bytes)
-    output_buf = io.BytesIO()
+def _decode_audio(audio_bytes: bytes) -> tuple[
+    list[av.AudioFrame],  # original frames (for waveform)
+    list[av.AudioFrame],  # resampled frames (for OGG/Opus)
+    int,                  # duration in seconds (rounded up)
+]:
+    """Decode audio data once.
 
-    with av.open(input_buf) as in_file:
-        in_stream = next((s for s in in_file.streams if s.type == "audio"), None)
-        if in_stream is None:
-            raise ValueError("No audio stream found")
+    Returns:
+        * original frames – raw audio frames at the source sample rate.
+        * resampled frames – frames converted to 48 kHz mono for Opus encoding.
+        * duration – total length in whole seconds (minimum 1).
+    """
+    with av.open(io.BytesIO(audio_bytes)) as container:
+        audio_stream = next(s for s in container.streams if s.type == "audio")
 
-        with av.open(output_buf, 'w', format='ogg') as out_file:
-            out_stream = out_file.add_stream('libopus', rate=48000)
-            out_stream.layout = 'mono'
-            out_stream.bit_rate = 32000
+        # Duration from stream metadata if available
+        if audio_stream.duration is not None and audio_stream.time_base is not None:
+            duration = float(audio_stream.duration * audio_stream.time_base)
+        else:
+            duration = None
 
-            resampler = av.AudioResampler(format='s16', layout='mono', rate=48000)
-            pts_counter = 0
-            
-            for frame in in_file.decode(audio=0):
-                try:
-                    resampled = resampler.resample(frame)
-                except Exception:
-                    resampled = frame
+        # Prepare a resampler for the required Opus format
+        resampler = av.AudioResampler(
+            format="s16",
+            layout="mono",
+            rate=48_000,
+        )
 
-                if resampled is None:
+        orig_frames: list[av.AudioFrame] = []
+        resampled_frames: list[av.AudioFrame] = []
+
+        for frame in container.decode(audio=0):
+            # Keep original frame for waveform
+            orig_frames.append(frame)
+
+            # Resample for OGG/Opus
+            try:
+                r = resampler.resample(frame)
+                if r is None:
                     continue
-
-                if isinstance(resampled, (list, tuple)):
-                    for r in resampled:
-                        r.pts = pts_counter
-                        pts_counter += r.samples
-                        for packet in out_stream.encode(r):
-                            out_file.mux(packet)
+                if isinstance(r, (list, tuple)):
+                    resampled_frames.extend(r)
                 else:
-                    resampled.pts = pts_counter
-                    pts_counter += resampled.samples
-                    for packet in out_stream.encode(resampled):
-                        out_file.mux(packet)
+                    resampled_frames.append(r)
+            except Exception:
+                # If resampling fails, skip adding to resampled list but keep original
+                pass
 
-            for packet in out_stream.encode(None):
+        # Fallback duration if header missing – use last original frame
+        if duration is None and orig_frames:
+            last = orig_frames[-1]
+            duration = float(last.time * audio_stream.time_base)
+
+        return orig_frames, resampled_frames, max(1, int(round(duration)))
+
+def _rms_envelope_from_frames(frames: list[av.AudioFrame], step_ms: int = 10) -> np.ndarray:
+    """Compute RMS envelope directly from decoded frames.
+
+    The function processes frames sequentially, accumulating samples until a
+    window of ``step_ms`` milliseconds is filled, then calculates the RMS of that
+    window. This avoids building a full audio array in memory.
+    """
+    if not frames:
+        return np.array([], dtype=np.float32)
+
+    # Sample rate is taken from the first frame (all frames share the same rate)
+    sample_rate = frames[0].sample_rate
+    samples_per_step = int(sample_rate * (step_ms / 1000))
+    if samples_per_step == 0:
+        samples_per_step = 1
+
+    envelope: list[float] = []
+    buffer = np.empty(0, dtype=np.float32)
+
+    for frame in frames:
+        # Convert frame to mono float32 samples
+        frame_arr = frame.to_ndarray().mean(axis=0).astype(np.float32)
+        # Append to rolling buffer
+        buffer = np.concatenate((buffer, frame_arr))
+        # Extract full steps
+        while buffer.size >= samples_per_step:
+            segment = buffer[:samples_per_step]
+            envelope.append(np.sqrt(np.mean(np.square(segment))))
+            buffer = buffer[samples_per_step:]
+
+    # Process any remaining samples as the final partial step
+    if buffer.size:
+        envelope.append(np.sqrt(np.mean(np.square(buffer))))
+
+    return np.array(envelope, dtype=np.float32)
+
+
+def convert_to_opus_ogg(frames: list[av.AudioFrame]) -> bytes:
+    """Encode a list of audio frames into an OGG/Opus byte stream."""
+    output_buf = io.BytesIO()
+    with av.open(output_buf, "w", format="ogg") as out_file:
+        out_stream = out_file.add_stream("libopus", rate=48_000)
+        out_stream.layout = "mono"
+        out_stream.bit_rate = 32_000
+
+        pts_counter = 0
+        for frame in frames:
+            # Ensure pts is monotonic for the encoder
+            frame.pts = pts_counter
+            pts_counter += frame.samples
+            for packet in out_stream.encode(frame):
                 out_file.mux(packet)
+
+        # Flush remaining packets
+        for packet in out_stream.encode(None):
+            out_file.mux(packet)
 
     output_buf.seek(0)
     return output_buf.read()
 
 
-def get_duration(audio_bytes: bytes) -> int:
-    """Get duration in seconds from an OGG/Opus file."""
-    with av.open(io.BytesIO(audio_bytes)) as container:
-        audio_stream = container.streams.audio[0]
-        # duration in seconds via time_base and frame count
-        if audio_stream.duration is not None and audio_stream.time_base is not None:
-            duration = float(audio_stream.duration * audio_stream.time_base)
-            return max(1, int(round(duration)))
 
-        # fallback counting frames
-        total = 0.0
-        for packet in container.demux(audio_stream):
-            for frame in packet.decode():
-                total += float(frame.samples) / frame.sample_rate
-        return max(1, int(round(total)))
+def generate_waveform(frames: list[av.AudioFrame]) -> str:
+    """Generate a base64‑encoded SVG waveform from decoded audio frames.
 
-def generate_waveform(ogg_data: bytes) -> str:
-    # 1. Decode & Filter
-    file_like = io.BytesIO(ogg_data)
-    container = av.open(file_like)
-    audio = np.concatenate([f.to_ndarray().mean(axis=0).astype(np.float32) for f in container.decode(audio=0)])
-    sample_rate = container.streams.audio[0].rate
-    
-    # 2. FIXED STEP ENVELOPE
-    # Instead of dividing by 256, we calculate a point every 10ms
-    step_ms = 10 
-    samples_per_step = int(sample_rate * (step_ms / 1000))
-    
-    # Calculate energy in fixed intervals
-    envelope = []
-    for i in range(0, len(audio), samples_per_step):
-        segment = audio[i:i+samples_per_step]
-        if len(segment) > 0:
-            # Using RMS for stability
-            envelope.append(np.sqrt(np.mean(np.square(segment))))
-    
-    envelope = np.array(envelope)
+    The RMS envelope is computed on‑the‑fly to avoid allocating a large audio
+    buffer.
+    """
+    # Compute RMS envelope directly from frames
+    envelope = _rms_envelope_from_frames(frames)
 
-    # 3. Resample Fixed Envelope -> 256 Bars
-    # This ensures that time is linear regardless of file length
-    x_old = np.linspace(0, 1, len(envelope))
+    if envelope.size == 0:
+        return ""
+
+    # Resample envelope to 256 bars for a fixed‑size waveform
+    x_old = np.linspace(0, 1, envelope.size)
     x_new = np.linspace(0, 1, 256)
     rms_vals = np.interp(x_new, x_old, envelope)
     
@@ -164,12 +205,12 @@ IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
 AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.webm', '.opus', '.mp4', '.wma'}
 
 def is_image_file(filename: str) -> bool:
-    """Check if a file is an image based on its extension."""
+    """Return ``True`` if the filename has a known image extension."""
     ext = os.path.splitext(filename)[1].lower()
     return ext in IMAGE_EXTENSIONS
 
 def is_audio_file(filename: str) -> bool:
-    """Check if a file is audio based on its extension."""
+    """Return ``True`` if the filename has a known audio extension."""
     ext = os.path.splitext(filename)[1].lower()
     return ext in AUDIO_EXTENSIONS
 
@@ -177,7 +218,11 @@ import traceback
 
 @app.post("/voice-notes")
 async def create_voice_note(audio: UploadFile = None, channel: str = Form(default="1")):
-    """Create a voice note or post an image to a Discord channel."""
+    """Endpoint to receive an uploaded file and forward it to Discord.
+
+    If the file is an image it is posted directly; otherwise it is processed as
+    an audio voice note.
+    """
     try:
         # Select channel ID based on form input
         target_channel = CHANNEL_ID_1 if channel == "1" else (CHANNEL_ID_2 or CHANNEL_ID_1)
@@ -210,7 +255,7 @@ async def create_voice_note(audio: UploadFile = None, channel: str = Form(defaul
 
 
 async def _post_image(target_channel: str, image_data: bytes, filename: str) -> dict:
-    """Post an image directly to Discord."""
+    """Upload an image file to a Discord channel as an attachment."""
     # Determine content type
     ext = os.path.splitext(filename)[1].lower()
     content_type_map = {
@@ -283,10 +328,15 @@ async def _post_image(target_channel: str, image_data: bytes, filename: str) -> 
 
 
 async def _post_voice_note(target_channel: str, audio_data: bytes) -> dict:
-    """Convert audio to OGG/Opus and post as voice note to Discord."""
-    ogg_data = convert_to_opus_ogg(audio_data)
-    duration = get_duration(ogg_data)
-    waveform = generate_waveform(ogg_data)
+    """Convert raw audio to OGG/Opus, generate a waveform, and send as a Discord voice note."""
+    # Single decode pass – get original frames, resampled frames, and duration
+    orig_frames, resampled_frames, duration = _decode_audio(audio_data)
+
+    # Encode the resampled frames to OGG/Opus
+    ogg_data = convert_to_opus_ogg(resampled_frames)
+
+    # Generate waveform from the original (non‑resampled) frames
+    waveform = generate_waveform(orig_frames)
 
     resp = httpx.post(
         f"{DISCORD_API}/channels/{target_channel}/attachments",
@@ -353,21 +403,23 @@ async def _post_voice_note(target_channel: str, audio_data: bytes) -> dict:
 
 @app.get("/health")
 async def health():
+    """Simple health‑check endpoint returning ``{"status": "ok"}``."""
     return {"status": "ok"}
 
 
 @app.post("/_debug_waveform")
 async def debug_waveform(audio: UploadFile):
-    """Debug endpoint: upload audio and get the generated waveform + raw values."""
+    """Debug endpoint that returns the generated waveform and raw byte values for an uploaded audio file."""
     audio_data = await audio.read()
-    ogg_data = convert_to_opus_ogg(audio_data)
-    waveform_b64 = generate_waveform(ogg_data)
-    
+    # Decode once – we only need the original frames for the waveform
+    orig_frames, _, _ = _decode_audio(audio_data)
+    waveform_b64 = generate_waveform(orig_frames)
+
     # Also return raw values for inspection
     import base64
     raw_bytes = base64.b64decode(waveform_b64)
     raw_values = list(raw_bytes)
-    
+
     return {
         "waveform_base64": waveform_b64,
         "raw_values": raw_values,
